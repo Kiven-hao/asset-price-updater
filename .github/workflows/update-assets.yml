@@ -1,0 +1,33 @@
+name: Update Asset Prices
+
+on:
+  schedule:
+    # UTC 10:00 = 北京时间 18:00，适合 A 股/港股收盘后更新。
+    - cron: "0 10 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  update-assets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Update Feishu asset table
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_APP_TOKEN: ${{ secrets.FEISHU_APP_TOKEN }}
+          FEISHU_TABLE_ID: ${{ secrets.FEISHU_TABLE_ID }}
+        run: python scripts/update_asset_prices.py
