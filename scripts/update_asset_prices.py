@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import sys
 from dataclasses import dataclass
@@ -115,7 +116,7 @@ def list_records(token: str, app_token: str, table_id: str) -> list[AssetRecord]
     ]
 
     while True:
-        params = {"page_size": 500, "field_names": field_names}
+        params = {"page_size": 500, "field_names": json.dumps(field_names, ensure_ascii=False)}
         if page_token:
             params["page_token"] = page_token
         resp = requests.get(
@@ -124,7 +125,8 @@ def list_records(token: str, app_token: str, table_id: str) -> list[AssetRecord]
             params=params,
             timeout=30,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            raise RuntimeError(f"Failed to list records HTTP {resp.status_code}: {resp.text}")
         data = resp.json()
         if data.get("code") != 0:
             raise RuntimeError(f"Failed to list records: {data}")
@@ -159,7 +161,8 @@ def update_record(token: str, app_token: str, table_id: str, record_id: str, fie
         json={"fields": fields},
         timeout=30,
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        raise RuntimeError(f"Failed to update record {record_id} HTTP {resp.status_code}: {resp.text}")
     data = resp.json()
     if data.get("code") != 0:
         raise RuntimeError(f"Failed to update record {record_id}: {data}")
