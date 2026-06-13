@@ -325,7 +325,7 @@ def main() -> int:
         print("No records with code and quantity found; nothing to update.")
         return 0
 
-    updated_at = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+    updated_at = int(dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).timestamp() * 1000)
     failures: list[str] = []
 
     for record in records:
