@@ -168,41 +168,120 @@ def update_record(token: str, app_token: str, table_id: str, record_id: str, fie
         raise RuntimeError(f"Failed to update record {record_id}: {data}")
 
 
-def get_a_share_price(code: str) -> float:
-    import akshare as ak
+def get_tencent_a_share_symbol(code: str) -> str:
+    normalized = code.zfill(6)
+    if normalized.startswith(("6", "9")):
+        return f"sh{normalized}"
+    if normalized.startswith(("0", "2", "3")):
+        return f"sz{normalized}"
+    if normalized.startswith(("4", "8")):
+        return f"bj{normalized}"
+    return f"sh{normalized}"
 
-    df = ak.stock_zh_a_spot_em()
-    row = df[df["代码"].astype(str).str.zfill(6) == code.zfill(6)]
-    if row.empty:
-        raise RuntimeError(f"A股行情未找到代码: {code}")
-    return float(row.iloc[0]["最新价"])
+
+def get_tencent_a_share_price(code: str) -> float:
+    symbol = get_tencent_a_share_symbol(code)
+    resp = requests.get(
+        f"https://qt.gtimg.cn/q={symbol}",
+        headers={
+            "Referer": "https://gu.qq.com/",
+            "User-Agent": "Mozilla/5.0 asset-price-updater",
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    text = resp.text.strip()
+    if "~" not in text:
+        raise RuntimeError(f"腾讯行情返回异常: {text[:120]}")
+    payload = text.split('"', 2)[1]
+    parts = payload.split("~")
+    if len(parts) <= 3 or not parts[3]:
+        raise RuntimeError(f"腾讯行情缺少价格字段: {text[:120]}")
+    return float(parts[3])
+
+
+def get_yfinance_price(symbol: str) -> float:
+    import yfinance as yf
+
+    ticker = yf.Ticker(symbol)
+    errors: list[str] = []
+    try:
+        info = ticker.fast_info
+        price = info.get("last_price") or info.get("regular_market_price")
+        if price:
+            return float(price)
+    except Exception as exc:
+        errors.append(str(exc))
+
+    try:
+        hist = ticker.history(period="5d")
+        if not hist.empty:
+            return float(hist["Close"].dropna().iloc[-1])
+    except Exception as exc:
+        errors.append(str(exc))
+
+    detail = f": {'; '.join(errors)}" if errors else ""
+    raise RuntimeError(f"yfinance 行情未找到代码 {symbol}{detail}")
+
+
+def get_a_share_yfinance_symbol(code: str) -> str:
+    normalized = code.zfill(6)
+    if normalized.startswith(("6", "9")):
+        return f"{normalized}.SS"
+    if normalized.startswith(("0", "2", "3")):
+        return f"{normalized}.SZ"
+    if normalized.startswith(("4", "8")):
+        return f"{normalized}.BJ"
+    return f"{normalized}.SS"
+
+
+def get_a_share_price(code: str) -> float:
+    errors: list[str] = []
+
+    try:
+        import akshare as ak
+
+        df = ak.stock_zh_a_spot_em()
+        row = df[df["代码"].astype(str).str.zfill(6) == code.zfill(6)]
+        if not row.empty:
+            return float(row.iloc[0]["最新价"])
+        errors.append(f"akshare 未找到代码 {code}")
+    except Exception as exc:
+        errors.append(f"akshare: {exc}")
+        print(f"WARN: akshare A股行情失败，改用腾讯行情兜底: {code}: {exc}", file=sys.stderr)
+
+    try:
+        return get_tencent_a_share_price(code)
+    except Exception as exc:
+        errors.append(f"tencent: {exc}")
+        print(f"WARN: 腾讯 A股行情失败，改用 yfinance 兜底: {code}: {exc}", file=sys.stderr)
+
+    try:
+        return get_yfinance_price(get_a_share_yfinance_symbol(code))
+    except Exception as exc:
+        errors.append(f"yfinance: {exc}")
+        raise RuntimeError(f"A股行情获取失败 {code}: {'; '.join(errors)}") from exc
 
 
 def get_hk_price(code: str) -> float:
-    import akshare as ak
-
     normalized = code.zfill(5)
-    df = ak.stock_hk_spot_em()
-    code_col = "代码" if "代码" in df.columns else "symbol"
-    price_col = "最新价" if "最新价" in df.columns else "lasttrade"
-    row = df[df[code_col].astype(str).str.replace("HK", "", regex=False).str.zfill(5) == normalized]
-    if row.empty:
-        raise RuntimeError(f"港股行情未找到代码: {code}")
-    return float(row.iloc[0][price_col])
+    try:
+        import akshare as ak
+
+        df = ak.stock_hk_spot_em()
+        code_col = "代码" if "代码" in df.columns else "symbol"
+        price_col = "最新价" if "最新价" in df.columns else "lasttrade"
+        row = df[df[code_col].astype(str).str.replace("HK", "", regex=False).str.zfill(5) == normalized]
+        if not row.empty:
+            return float(row.iloc[0][price_col])
+    except Exception as exc:
+        print(f"WARN: akshare 港股行情失败，改用 yfinance 兜底: {code}: {exc}", file=sys.stderr)
+
+    return get_yfinance_price(f"{normalized}.HK")
 
 
 def get_us_price(code: str) -> float:
-    import yfinance as yf
-
-    ticker = yf.Ticker(code.upper())
-    info = ticker.fast_info
-    price = info.get("last_price") or info.get("regular_market_price")
-    if not price:
-        hist = ticker.history(period="5d")
-        if hist.empty:
-            raise RuntimeError(f"美股行情未找到代码: {code}")
-        price = hist["Close"].dropna().iloc[-1]
-    return float(price)
+    return get_yfinance_price(code.upper())
 
 
 def get_price(record: AssetRecord) -> float:
