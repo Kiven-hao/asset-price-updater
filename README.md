@@ -38,6 +38,8 @@ FEISHU_APP_ID
 FEISHU_APP_SECRET
 FEISHU_APP_TOKEN=OlNBbXSu2aSM7wsaT00cBIjgnWe
 FEISHU_TABLE_ID=tblOiN9Gj6dirtYR
+PUSHPLUS_TOKEN
+PUSHPLUS_TOPIC  # 可选，群组编码；个人推送可留空
 ```
 
 飞书应用需要具备多维表格读写权限，并且应用/bot 需要能访问该 Base。
@@ -64,3 +66,24 @@ python scripts/update_asset_prices.py
 - 场内基金/ETF：按所属市场 `A股 / 港股 / 美股` 走实时行情，计算当日盈亏
 - 场外基金：所属市场填 `场外基金`，使用 `akshare.fund_open_fund_info_em` 获取最新净值，计算昨日盈亏
 
+
+## 每日微信推送
+
+仓库包含第二个 workflow：`.github/workflows/send-daily-summary.yml`。
+
+它会在每天北京时间 09:00 运行，读取飞书表中的：
+
+- `人民币市值`：汇总当前资产总额
+- `当日盈亏`：实时行情资产上一交易日收盘后的盈亏
+- `昨日盈亏`：场外基金这类延迟净值资产的昨日盈亏
+
+然后通过 PushPlus 推送 Markdown 消息到微信。
+
+需要在 GitHub Secrets 中额外配置：
+
+```text
+PUSHPLUS_TOKEN
+PUSHPLUS_TOPIC  # 可选，群组编码；个人推送可不配
+```
+
+PushPlus token 可在 PushPlus 官网个人中心获取。
