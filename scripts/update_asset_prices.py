@@ -23,6 +23,12 @@ FIELD_QUANTITY = "持仓数量"
 FIELD_PRICE = "现价"
 FIELD_FX = "汇率"
 FIELD_MARKET_VALUE_CNY = "人民币市值"
+FIELD_PREVIOUS_PRICE = "前收/上一净值"
+FIELD_DAILY_PNL = "当日盈亏"
+FIELD_DAILY_CHANGE_PCT = "当日涨跌幅"
+FIELD_YESTERDAY_PNL = "昨日盈亏"
+FIELD_NAV_DATE = "净值日期"
+FIELD_QUOTE_TYPE = "行情类型"
 FIELD_UPDATED_AT = "更新时间"
 
 
@@ -35,6 +41,14 @@ class AssetRecord:
     market: str
     currency: str
     quantity: float
+
+
+@dataclass
+class Quote:
+    price: float
+    previous_price: float | None
+    quote_type: str
+    nav_date: str | None = None
 
 
 def env(name: str) -> str:
@@ -101,6 +115,18 @@ def to_float(value: Any) -> float:
         return float(value)
     text = normalize_text(value).replace(",", "")
     return float(text) if text else 0.0
+
+
+def pct_change(price: float, previous_price: float | None) -> float | None:
+    if previous_price in (None, 0):
+        return None
+    return (price - previous_price) / previous_price
+
+
+def date_to_timestamp_ms(date_text: str) -> int:
+    parsed = dt.datetime.strptime(date_text[:10], "%Y-%m-%d")
+    parsed = parsed.replace(tzinfo=dt.timezone(dt.timedelta(hours=8)))
+    return int(parsed.timestamp() * 1000)
 
 
 def list_records(token: str, app_token: str, table_id: str) -> list[AssetRecord]:
@@ -179,7 +205,7 @@ def get_tencent_a_share_symbol(code: str) -> str:
     return f"sh{normalized}"
 
 
-def get_tencent_a_share_price(code: str) -> float:
+def get_tencent_a_share_quote(code: str) -> Quote:
     symbol = get_tencent_a_share_symbol(code)
     resp = requests.get(
         f"https://qt.gtimg.cn/q={symbol}",
@@ -195,12 +221,17 @@ def get_tencent_a_share_price(code: str) -> float:
         raise RuntimeError(f"腾讯行情返回异常: {text[:120]}")
     payload = text.split('"', 2)[1]
     parts = payload.split("~")
-    if len(parts) <= 3 or not parts[3]:
+    if len(parts) <= 4 or not parts[3]:
         raise RuntimeError(f"腾讯行情缺少价格字段: {text[:120]}")
-    return float(parts[3])
+    previous_price = float(parts[4]) if parts[4] else None
+    return Quote(price=float(parts[3]), previous_price=previous_price, quote_type="实时行情")
 
 
-def get_yfinance_price(symbol: str) -> float:
+def get_tencent_a_share_price(code: str) -> float:
+    return get_tencent_a_share_quote(code).price
+
+
+def get_yfinance_quote(symbol: str) -> Quote:
     import yfinance as yf
 
     ticker = yf.Ticker(symbol)
@@ -208,20 +239,32 @@ def get_yfinance_price(symbol: str) -> float:
     try:
         info = ticker.fast_info
         price = info.get("last_price") or info.get("regular_market_price")
+        previous_price = info.get("previous_close")
         if price:
-            return float(price)
+            return Quote(
+                price=float(price),
+                previous_price=float(previous_price) if previous_price else None,
+                quote_type="实时行情",
+            )
     except Exception as exc:
         errors.append(str(exc))
 
     try:
         hist = ticker.history(period="5d")
-        if not hist.empty:
-            return float(hist["Close"].dropna().iloc[-1])
+        closes = hist["Close"].dropna() if not hist.empty else []
+        if len(closes) >= 2:
+            return Quote(price=float(closes.iloc[-1]), previous_price=float(closes.iloc[-2]), quote_type="实时行情")
+        if len(closes) == 1:
+            return Quote(price=float(closes.iloc[-1]), previous_price=None, quote_type="实时行情")
     except Exception as exc:
         errors.append(str(exc))
 
     detail = f": {'; '.join(errors)}" if errors else ""
     raise RuntimeError(f"yfinance 行情未找到代码 {symbol}{detail}")
+
+
+def get_yfinance_price(symbol: str) -> float:
+    return get_yfinance_quote(symbol).price
 
 
 def get_a_share_yfinance_symbol(code: str) -> str:
@@ -235,7 +278,7 @@ def get_a_share_yfinance_symbol(code: str) -> str:
     return f"{normalized}.SS"
 
 
-def get_a_share_price(code: str) -> float:
+def get_a_share_quote(code: str) -> Quote:
     errors: list[str] = []
 
     try:
@@ -244,26 +287,37 @@ def get_a_share_price(code: str) -> float:
         df = ak.stock_zh_a_spot_em()
         row = df[df["代码"].astype(str).str.zfill(6) == code.zfill(6)]
         if not row.empty:
-            return float(row.iloc[0]["最新价"])
+            item = row.iloc[0]
+            price = float(item["最新价"])
+            previous_price = None
+            if "昨收" in row.columns and item["昨收"] not in (None, ""):
+                previous_price = float(item["昨收"])
+            elif "涨跌额" in row.columns and item["涨跌额"] not in (None, ""):
+                previous_price = price - float(item["涨跌额"])
+            return Quote(price=price, previous_price=previous_price, quote_type="实时行情")
         errors.append(f"akshare 未找到代码 {code}")
     except Exception as exc:
         errors.append(f"akshare: {exc}")
         print(f"WARN: akshare A股行情失败，改用腾讯行情兜底: {code}: {exc}", file=sys.stderr)
 
     try:
-        return get_tencent_a_share_price(code)
+        return get_tencent_a_share_quote(code)
     except Exception as exc:
         errors.append(f"tencent: {exc}")
         print(f"WARN: 腾讯 A股行情失败，改用 yfinance 兜底: {code}: {exc}", file=sys.stderr)
 
     try:
-        return get_yfinance_price(get_a_share_yfinance_symbol(code))
+        return get_yfinance_quote(get_a_share_yfinance_symbol(code))
     except Exception as exc:
         errors.append(f"yfinance: {exc}")
         raise RuntimeError(f"A股行情获取失败 {code}: {'; '.join(errors)}") from exc
 
 
-def get_hk_price(code: str) -> float:
+def get_a_share_price(code: str) -> float:
+    return get_a_share_quote(code).price
+
+
+def get_hk_quote(code: str) -> Quote:
     normalized = code.zfill(5)
     try:
         import akshare as ak
@@ -273,27 +327,67 @@ def get_hk_price(code: str) -> float:
         price_col = "最新价" if "最新价" in df.columns else "lasttrade"
         row = df[df[code_col].astype(str).str.replace("HK", "", regex=False).str.zfill(5) == normalized]
         if not row.empty:
-            return float(row.iloc[0][price_col])
+            item = row.iloc[0]
+            price = float(item[price_col])
+            previous_price = None
+            for candidate in ("昨收", "前收盘价", "prev_close"):
+                if candidate in row.columns and item[candidate] not in (None, ""):
+                    previous_price = float(item[candidate])
+                    break
+            return Quote(price=price, previous_price=previous_price, quote_type="实时行情")
     except Exception as exc:
         print(f"WARN: akshare 港股行情失败，改用 yfinance 兜底: {code}: {exc}", file=sys.stderr)
 
-    return get_yfinance_price(f"{normalized}.HK")
+    return get_yfinance_quote(f"{normalized}.HK")
+
+
+def get_hk_price(code: str) -> float:
+    return get_hk_quote(code).price
+
+
+def get_us_quote(code: str) -> Quote:
+    return get_yfinance_quote(code.upper())
 
 
 def get_us_price(code: str) -> float:
-    return get_yfinance_price(code.upper())
+    return get_us_quote(code).price
+
+
+def get_open_fund_quote(code: str) -> Quote:
+    import akshare as ak
+
+    df = ak.fund_open_fund_info_em(fund=code.zfill(6), indicator="单位净值走势")
+    if df.empty or len(df) < 1:
+        raise RuntimeError(f"场外基金净值未找到代码: {code}")
+    df = df.dropna(subset=["单位净值"])
+    if df.empty:
+        raise RuntimeError(f"场外基金净值为空: {code}")
+    latest = df.iloc[-1]
+    previous = df.iloc[-2] if len(df) >= 2 else None
+    previous_price = float(previous["单位净值"]) if previous is not None else None
+    return Quote(
+        price=float(latest["单位净值"]),
+        previous_price=previous_price,
+        quote_type="延迟净值",
+        nav_date=str(latest["净值日期"]),
+    )
+
+
+def get_quote(record: AssetRecord) -> Quote:
+    market = record.market.strip()
+    if market == "A股":
+        return get_a_share_quote(record.code)
+    if market == "港股":
+        return get_hk_quote(record.code)
+    if market == "美股":
+        return get_us_quote(record.code)
+    if market == "场外基金":
+        return get_open_fund_quote(record.code)
+    raise RuntimeError(f"不支持的市场: {record.market} ({record.code})")
 
 
 def get_price(record: AssetRecord) -> float:
-    market = record.market.strip()
-    if market == "A股":
-        return get_a_share_price(record.code)
-    if market == "港股":
-        return get_hk_price(record.code)
-    if market == "美股":
-        return get_us_price(record.code)
-    raise RuntimeError(f"不支持的市场: {record.market} ({record.code})")
-
+    return get_quote(record).price
 
 def get_fx_rate(currency: str) -> float:
     if currency == "人民币":
@@ -330,22 +424,43 @@ def main() -> int:
 
     for record in records:
         try:
-            price = get_price(record)
+            quote = get_quote(record)
             fx_rate = get_fx_rate(record.currency)
-            market_value = record.quantity * price * fx_rate
-            update_record(
-                token,
-                app_token,
-                table_id,
-                record.record_id,
-                {
-                    FIELD_PRICE: round(price, 4),
-                    FIELD_FX: round(fx_rate, 4),
-                    FIELD_MARKET_VALUE_CNY: round(market_value, 4),
-                    FIELD_UPDATED_AT: updated_at,
-                },
+            market_value = record.quantity * quote.price * fx_rate
+            change_pct = pct_change(quote.price, quote.previous_price)
+
+            fields: dict[str, Any] = {
+                FIELD_PRICE: round(quote.price, 4),
+                FIELD_FX: round(fx_rate, 4),
+                FIELD_MARKET_VALUE_CNY: round(market_value, 4),
+                FIELD_PREVIOUS_PRICE: round(quote.previous_price, 4) if quote.previous_price is not None else None,
+                FIELD_DAILY_CHANGE_PCT: round(change_pct, 6) if change_pct is not None and quote.quote_type == "实时行情" else None,
+                FIELD_QUOTE_TYPE: quote.quote_type,
+                FIELD_UPDATED_AT: updated_at,
+            }
+
+            if quote.quote_type == "实时行情":
+                fields[FIELD_DAILY_PNL] = (
+                    round((quote.price - quote.previous_price) * record.quantity * fx_rate, 4)
+                    if quote.previous_price is not None
+                    else None
+                )
+                fields[FIELD_YESTERDAY_PNL] = None
+                fields[FIELD_NAV_DATE] = None
+            else:
+                fields[FIELD_DAILY_PNL] = None
+                fields[FIELD_YESTERDAY_PNL] = (
+                    round((quote.price - quote.previous_price) * record.quantity * fx_rate, 4)
+                    if quote.previous_price is not None
+                    else None
+                )
+                fields[FIELD_NAV_DATE] = date_to_timestamp_ms(quote.nav_date) if quote.nav_date else None
+
+            update_record(token, app_token, table_id, record.record_id, fields)
+            print(
+                f"Updated {record.name or record.code}: price={quote.price:.4f}, "
+                f"value_cny={market_value:.4f}, quote_type={quote.quote_type}"
             )
-            print(f"Updated {record.name or record.code}: price={price:.4f}, value_cny={market_value:.4f}")
         except Exception as exc:  # Keep other assets updating even if one source fails.
             message = f"{record.name or record.code}({record.code}): {exc}"
             failures.append(message)
